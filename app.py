@@ -27,10 +27,6 @@ def get_info():
     return Info(constants.MAINNET_API_URL, skip_ws=True)
 
 def has_open_position(info, address, ticker):
-    """
-    Verifica daca avem deja o pozitie deschisa pe acest Ticker.
-    Returneaza True daca avem pozitie (Long sau Short).
-    """
     try:
         user_state = info.user_state(address)
         for position in user_state["assetPositions"]:
@@ -42,7 +38,7 @@ def has_open_position(info, address, ticker):
         return False
     except Exception as e:
         print(f"Eroare la verificarea pozitiei: {e}")
-        return False # Daca e eroare, presupunem ca nu avem, ca sa nu blocam tradingul aiurea, sau poti pune True pt safety.
+        return False
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -56,9 +52,9 @@ def webhook():
     action = data.get('action') 
     size_usd = float(data.get('size_usd'))
     
-    # Citim SL si TP
-    sl_price = float(data.get('sl', 0))
-    tp_price = float(data.get('tp', 0))
+    # FIX CRITIC: Eliminam zecimalele. Rotunjim la numar intreg pentru a respecta HL Tick Size.
+    sl_price = int(round(float(data.get('sl', 0))))
+    tp_price = int(round(float(data.get('tp', 0))))
     
     is_buy = (action.lower() == 'buy')
 
@@ -67,7 +63,7 @@ def webhook():
         info = get_info()
         address = exchange.account.address
         
-        # --- 1. SINGLE SHOT LOGIC (Check Position) ---
+        # --- 1. SINGLE SHOT LOGIC ---
         if has_open_position(info, address, ticker):
             msg = f"IGNORAT: Avem deja o pozitie deschisa pe {ticker}. Nu facem stacking."
             print(msg)
@@ -76,8 +72,7 @@ def webhook():
         # --- 2. EXECUTE ENTRY ---
         all_mids = info.all_mids()
         current_price = float(all_mids[ticker])
-        size_coin = size_usd / current_price
-        size_coin = round(size_coin, 5)
+        size_coin = round(size_usd / current_price, 5)
 
         print(f">>> EXECUTE ENTRY: {action} {ticker} | Size: {size_coin} BTC | Price: {current_price}")
 
@@ -98,7 +93,7 @@ def webhook():
             if sl_price > 0:
                 try:
                     print(f"Placing SL at {sl_price}...")
-                    exchange.order(
+                    sl_res = exchange.order(
                         name=ticker,
                         is_buy=is_exit_buy,
                         sz=size_coin,
@@ -106,14 +101,15 @@ def webhook():
                         order_type={"trigger": {"isMarket": True, "triggerPx": sl_price, "tpsl": "sl"}},
                         reduce_only=True
                     )
+                    print(f"SL RESPONSE: {sl_res}") # Monitorizam raspunsul HL
                 except Exception as e:
-                    print(f"FAILED TO PLACE SL: {e}")
+                    print(f"FAILED TO PLACE SL (Exception): {e}")
 
             # TAKE PROFIT
             if tp_price > 0:
                 try:
                     print(f"Placing TP at {tp_price}...")
-                    exchange.order(
+                    tp_res = exchange.order(
                         name=ticker,
                         is_buy=is_exit_buy,
                         sz=size_coin,
@@ -121,8 +117,9 @@ def webhook():
                         order_type={"limit": {"tif": "Gtc"}},
                         reduce_only=True
                     )
+                    print(f"TP RESPONSE: {tp_res}") # Monitorizam raspunsul HL
                 except Exception as e:
-                    print(f"FAILED TO PLACE TP: {e}")
+                    print(f"FAILED TO PLACE TP (Exception): {e}")
 
         return jsonify(order_result), 200
 
@@ -132,7 +129,7 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "TITAN BOT ONLINE (SINGLE SHOT MODE)", 200
+    return "TITAN BOT ONLINE (SL/TP FIX ACTIV)", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
