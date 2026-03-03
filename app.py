@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 import os
-import json
 import eth_account
 from eth_account.signers.local import LocalAccount
 from hyperliquid.exchange import Exchange
@@ -12,21 +11,23 @@ app = Flask(__name__)
 # --- CONFIGURARE ---
 BOT_STATUS = "START" 
 
-def get_exchange():
+def get_account():
     private_key = os.getenv("HYPERLIQUID_PRIVATE_KEY")
     if not private_key:
         print("CRITICAL ERROR: 'HYPERLIQUID_PRIVATE_KEY' lipseste!")
         raise ValueError("Missing Key")
     if not private_key.startswith("0x"):
         private_key = "0x" + private_key
-    account: LocalAccount = eth_account.Account.from_key(private_key)
-    exchange = Exchange(account, constants.MAINNET_API_URL)
-    return exchange
+    # Generam obiectul de cont direct din cheia privata
+    return eth_account.Account.from_key(private_key)
 
 def get_info():
     return Info(constants.MAINNET_API_URL, skip_ws=True)
 
 def has_open_position(info, address, ticker):
+    """
+    Verifica daca avem deja o pozitie deschisa pe acest Ticker.
+    """
     try:
         user_state = info.user_state(address)
         for position in user_state["assetPositions"]:
@@ -52,18 +53,22 @@ def webhook():
     action = data.get('action') 
     size_usd = float(data.get('size_usd'))
     
-    # FIX CRITIC: Eliminam zecimalele. Rotunjim la numar intreg pentru a respecta HL Tick Size.
+    # Rotunjim SL/TP pentru a respecta tick size-ul Hyperliquid
     sl_price = int(round(float(data.get('sl', 0))))
     tp_price = int(round(float(data.get('tp', 0))))
     
     is_buy = (action.lower() == 'buy')
 
     try:
-        exchange = get_exchange()
+        # AICI E FIX-UL: Separam generarea contului de crearea exchange-ului
+        account = get_account()
+        exchange = Exchange(account, constants.MAINNET_API_URL)
         info = get_info()
-        address = exchange.account.address
         
-        # --- 1. SINGLE SHOT LOGIC ---
+        # Extragem adresa in mod antiglont, direct din contul Ethereum
+        address = account.address 
+        
+        # --- 1. SINGLE SHOT LOGIC (Check Position) ---
         if has_open_position(info, address, ticker):
             msg = f"IGNORAT: Avem deja o pozitie deschisa pe {ticker}. Nu facem stacking."
             print(msg)
@@ -101,9 +106,9 @@ def webhook():
                         order_type={"trigger": {"isMarket": True, "triggerPx": sl_price, "tpsl": "sl"}},
                         reduce_only=True
                     )
-                    print(f"SL RESPONSE: {sl_res}") # Monitorizam raspunsul HL
+                    print(f"SL RESPONSE: {sl_res}")
                 except Exception as e:
-                    print(f"FAILED TO PLACE SL (Exception): {e}")
+                    print(f"FAILED TO PLACE SL: {e}")
 
             # TAKE PROFIT
             if tp_price > 0:
@@ -117,9 +122,9 @@ def webhook():
                         order_type={"limit": {"tif": "Gtc"}},
                         reduce_only=True
                     )
-                    print(f"TP RESPONSE: {tp_res}") # Monitorizam raspunsul HL
+                    print(f"TP RESPONSE: {tp_res}")
                 except Exception as e:
-                    print(f"FAILED TO PLACE TP (Exception): {e}")
+                    print(f"FAILED TO PLACE TP: {e}")
 
         return jsonify(order_result), 200
 
@@ -129,7 +134,7 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "TITAN BOT ONLINE (SL/TP FIX ACTIV)", 200
+    return "TITAN BOT ONLINE (FIX ATTRIBUTE ERROR)", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
