@@ -5,6 +5,7 @@ from eth_account.signers.local import LocalAccount
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
+import threading # NOU: Importam threading pentru Background Tasks
 
 app = Flask(__name__)
 
@@ -36,33 +37,28 @@ def has_open_position(info, address, ticker):
         print(f"Eroare la verificarea pozitiei: {e}")
         return False
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.json
-    print(f"WEBHOOK PRIMIT: {data}")
-
-    if BOT_STATUS != "START":
-        return jsonify({"status": "stopped"}), 200
-
-    ticker = data.get('ticker')
-    action = data.get('action') 
-    size_usd = float(data.get('size_usd'))
-    
-    sl_price = int(round(float(data.get('sl', 0))))
-    tp_price = int(round(float(data.get('tp', 0))))
-    
-    is_buy = (action.lower() == 'buy')
-
+# ==========================================
+# THE HEAVY LIFTING (Background Worker)
+# ==========================================
+def execute_trade_logic(data):
     try:
+        ticker = data.get('ticker')
+        action = data.get('action') 
+        size_usd = float(data.get('size_usd'))
+        
+        sl_price = int(round(float(data.get('sl', 0))))
+        tp_price = int(round(float(data.get('tp', 0))))
+        
+        is_buy = (action.lower() == 'buy')
+
         account = get_account()
         exchange = Exchange(account, constants.MAINNET_API_URL)
         info = get_info()
         address = account.address 
         
         if has_open_position(info, address, ticker):
-            msg = f"IGNORAT: Avem deja o pozitie deschisa pe {ticker}."
-            print(msg)
-            return jsonify({"status": "ignored", "reason": "position_already_open"}), 200
+            print(f"IGNORAT: Avem deja o pozitie deschisa pe {ticker}.")
+            return
 
         all_mids = info.all_mids()
         current_price = float(all_mids[ticker])
@@ -71,7 +67,7 @@ def webhook():
         print(f">>> EXECUTE ENTRY: {action} {ticker} | Size: {size_coin} BTC")
         order_result = exchange.market_open(name=ticker, is_buy=is_buy, sz=size_coin, px=None, slippage=0.01)
         
-        if order_result["status"] == "ok":
+        if order_result.get("status") == "ok":
             is_exit_buy = not is_buy
             
             if sl_price > 0:
@@ -86,15 +82,31 @@ def webhook():
                 except Exception as e:
                     print(f"FAILED TO PLACE TP: {e}")
 
-        return jsonify(order_result), 200
-
     except Exception as e:
-        print(f"EROARE EXECUTIE: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"EROARE EXECUTIE BACKGROUND: {e}")
+
+
+# ==========================================
+# THE FRONT DESK (Fast Ack pt TradingView)
+# ==========================================
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.json
+    print(f"\nWEBHOOK PRIMIT: {data}")
+
+    if BOT_STATUS != "START":
+        return jsonify({"status": "stopped"}), 200
+
+    # Delegam treaba grea catre un Thread separat
+    trade_thread = threading.Thread(target=execute_trade_logic, args=(data,))
+    trade_thread.start()
+
+    # Raspundem INSTANT la TradingView ca sa evitam eroarea de Timeout
+    return jsonify({"status": "fast_ack", "message": "Semnal receptionat, executie in fundal"}), 200
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "TITAN BOT ONLINE (BTC MASTER ACCOUNT)", 200
+    return "TITAN BOT ONLINE (FAST ACK ACTIVE)", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
